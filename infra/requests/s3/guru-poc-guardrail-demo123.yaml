@@ -1,4 +1,4 @@
-bucket_name: guru-poc-guardrail-demo123
+bucket_name: guru-poc-guardrail2-demo123
 region: ap-south-1
 tags:
   owner: guru
