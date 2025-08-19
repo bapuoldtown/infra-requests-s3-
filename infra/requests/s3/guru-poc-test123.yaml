@@ -1,2 +1,5 @@
-bucket_name: guru-poc-test123456
+bucket_name: guru-poc-guardrail11-demo12378
 region: ap-south-1
+tags:
+  owner: guru
+  env: dev
