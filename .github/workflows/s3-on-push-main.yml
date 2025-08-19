@@ -11,11 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  collect:
+  apply:
     runs-on: ubuntu-latest
-    outputs:
-      matrix:   ${{ steps.mk.outputs.matrix }}
-      has_items: ${{ steps.mk.outputs.has_items }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,45 +22,78 @@ jobs:
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Build matrix from changed files
-        id: mk
+      - name: Configure AWS credentials (IAM keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Find changed request files in this push
+        id: changed
         shell: bash
         run: |
           set -euo pipefail
           before="${{ github.event.before }}"
           after="${{ github.sha }}"
           files=$(git diff --name-only "$before" "$after" -- 'infra/requests/s3/*.yml' 'infra/requests/s3/*.yaml' || true)
-
+          echo "Changed files: $files"
           if [ -z "$files" ]; then
-            echo 'matrix={"include":[]}'   >> "$GITHUB_OUTPUT"
-            echo "has_items=false"         >> "$GITHUB_OUTPUT"
-            echo "No request files changed."
-            exit 0
+            echo "has_items=false" >> "$GITHUB_OUTPUT"
+          else
+            printf "%s\n" $files > /tmp/changed.txt
+            echo "has_items=true"  >> "$GITHUB_OUTPUT"
           fi
 
-          json='{"include":['
-          first=1
-          for f in $files; do
-            bn=$(yq '.bucket_name' "$f")
-            rg=$(yq '.region' "$f")
-            if [ $first -eq 0 ]; then json="$json,"; fi
-            json="$json{\"bucket\":\"$bn\",\"region\":\"$rg\"}"
-            first=0
-          done
-          json="$json]}"
+      - name: Provision each requested bucket
+        if: steps.changed.outputs.has_items == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while read -r f; do
+            [ -z "$f" ] && continue
+            echo "---- Processing $f ----"
+            BUCKET=$(yq '.bucket_name' "$f")
+            REGION=$(yq '.region' "$f")
 
-          echo "matrix=$json"   >> "$GITHUB_OUTPUT"
-          echo "has_items=true" >> "$GITHUB_OUTPUT"
-          echo "Matrix: $json"
+            # Basic validations
+            [[ "$BUCKET" =~ ^[a-z0-9.-]{3,63}$ ]] || { echo "Invalid bucket name: $BUCKET"; exit 1; }
+            [[ "$BUCKET" =~ ^guru-poc- ]] || { echo "Bucket must start with 'guru-poc-'"; exit 1; }
+            [ -n "$REGION" ] || { echo "Missing region in $f"; exit 1; }
 
-  provision:
-    needs: collect
-    if: ${{ needs.collect.outputs.has_items == 'true' }}
-    strategy:
-      matrix: ${{ fromJSON(needs.collect.outputs.matrix) }}
-      max-parallel: 2
-    uses: ./.github/workflows/_reusable-s3-provision.yml
-    with:
-      bucket_name: ${{ matrix.bucket }}
-      region:      ${{ matrix.region }}
-    secrets: inherit
+            echo "Bucket: $BUCKET | Region: $REGION"
+
+            # Create if missing
+            if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+              echo "Bucket exists."
+            else
+              if [ "$REGION" = "us-east-1" ]; then
+                aws s3api create-bucket --bucket "$BUCKET"
+              else
+                aws s3api create-bucket --bucket "$BUCKET" \
+                  --create-bucket-configuration LocationConstraint="$REGION"
+              fi
+              echo "Created $BUCKET"
+            fi
+
+            # Block public access
+            aws s3api put-public-access-block --bucket "$BUCKET" \
+              --public-access-block-configuration \
+              BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+            # Default encryption (SSE-S3)
+            aws s3api put-bucket-encryption --bucket "$BUCKET" \
+              --server-side-encryption-configuration '{
+                "Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]
+              }'
+
+            # Versioning
+            aws s3api put-bucket-versioning --bucket "$BUCKET" \
+              --versioning-configuration Status=Enabled
+
+            # Show config
+            echo "Encryption:" && aws s3api get-bucket-encryption --bucket "$BUCKET" || true
+            echo "Versioning:" && aws s3api get-bucket-versioning --bucket "$BUCKET" || true
+            echo "Public access block:" && aws s3api get-public-access-block --bucket "$BUCKET" || true
+            echo "---- Done $f ----"
+          done < /tmp/changed.txt
