@@ -1,3 +1,4 @@
+# .github/workflows/_reusable-s3-provision.yml
 name: _reusable S3 Provision (IAM Keys)
 
 on:
@@ -30,6 +31,17 @@ jobs:
 
       - name: Verify identity
         run: aws sts get-caller-identity
+
+      - name: Sanity checks (name, prefix, region)
+        shell: bash
+        run: |
+          set -euo pipefail
+          B="${{ inputs.bucket_name }}"
+          R="${{ inputs.region }}"
+          [[ "$B" =~ ^[a-z0-9.-]{3,63}$ ]] || { echo "Invalid bucket name: $B"; exit 1; }
+          # (Optional) enforce your prefix — comment out if not needed
+          [[ "$B" =~ ^guru-poc- ]] || { echo "Bucket must start with 'guru-poc-'"; exit 1; }
+          echo "Bucket: $B | Region: $R"
 
       - name: Create bucket if missing
         shell: bash
@@ -69,6 +81,9 @@ jobs:
 
       - name: Show final configuration
         run: |
+          echo "Encryption:"
           aws s3api get-bucket-encryption --bucket "${{ inputs.bucket_name }}" || true
+          echo "Versioning:"
           aws s3api get-bucket-versioning --bucket "${{ inputs.bucket_name }}" || true
+          echo "Public access block:"
           aws s3api get-public-access-block --bucket "${{ inputs.bucket_name }}" || true
