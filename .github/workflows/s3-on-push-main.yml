@@ -1,0 +1,65 @@
+# .github/workflows/s3-on-push-main.yml
+name: Apply S3 Requests (push to main)
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'infra/requests/s3/*.yml'
+      - 'infra/requests/s3/*.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo apt-get update -y
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Build matrix from changed files
+        id: mk
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+          files=$(git diff --name-only "$before" "$after" -- 'infra/requests/s3/*.yml' 'infra/requests/s3/*.yaml' || true)
+
+          if [ -z "$files" ]; then
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='{"include":['
+          first=1
+          for f in $files; do
+            bn=$(yq '.bucket_name' "$f")
+            rg=$(yq '.region' "$f")
+            if [ $first -eq 0 ]; then json="$json,"; fi
+            json="$json{\"bucket\":\"$bn\",\"region\":\"$rg\"}"
+            first=0
+          done
+          json="$json]}"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $json"
+
+  provision:
+    needs: collect
+    if: ${{ fromJSON(needs.collect.outputs.matrix).include && (length(fromJSON(needs.collect.outputs.matrix).include) > 0) }}
+    strategy:
+      matrix: ${{ fromJSON(needs.collect.outputs.matrix) }}
+      max-parallel: 2
+    uses: ./.github/workflows/_reusable-s3-provision.yml
+    with:
+      bucket_name: ${{ matrix.bucket }}
+      region:      ${{ matrix.region }}
+    secrets: inherit
