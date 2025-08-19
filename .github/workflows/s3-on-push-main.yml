@@ -29,15 +29,14 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-south-1
 
-      - name: Find changed request files in this push
+      # === Option B: scan ALL request files each push ===
+      - name: Collect request files (scan-all)
         id: changed
         shell: bash
         run: |
           set -euo pipefail
-          before="${{ github.event.before }}"
-          after="${{ github.sha }}"
-          files=$(git diff --name-only "$before" "$after" -- 'infra/requests/s3/*.yml' 'infra/requests/s3/*.yaml' || true)
-          echo "Changed files: $files"
+          files=$(ls infra/requests/s3/*.yml infra/requests/s3/*.yaml 2>/dev/null || true)
+          echo "Found files: $files"
           if [ -z "$files" ]; then
             echo "has_items=false" >> "$GITHUB_OUTPUT"
           else
