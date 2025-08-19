@@ -1,4 +1,3 @@
-# .github/workflows/s3-on-push-main.yml
 name: Apply S3 Requests (push to main)
 
 on:
@@ -15,7 +14,8 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.mk.outputs.matrix }}
+      matrix:   ${{ steps.mk.outputs.matrix }}
+      has_items: ${{ steps.mk.outputs.has_items }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +35,9 @@ jobs:
           files=$(git diff --name-only "$before" "$after" -- 'infra/requests/s3/*.yml' 'infra/requests/s3/*.yaml' || true)
 
           if [ -z "$files" ]; then
-            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}'   >> "$GITHUB_OUTPUT"
+            echo "has_items=false"         >> "$GITHUB_OUTPUT"
+            echo "No request files changed."
             exit 0
           fi
 
@@ -49,12 +51,14 @@ jobs:
             first=0
           done
           json="$json]}"
-          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+          echo "matrix=$json"   >> "$GITHUB_OUTPUT"
+          echo "has_items=true" >> "$GITHUB_OUTPUT"
           echo "Matrix: $json"
 
   provision:
     needs: collect
-    if: ${{ fromJSON(needs.collect.outputs.matrix).include && (length(fromJSON(needs.collect.outputs.matrix).include) > 0) }}
+    if: ${{ needs.collect.outputs.has_items == 'true' }}
     strategy:
       matrix: ${{ fromJSON(needs.collect.outputs.matrix) }}
       max-parallel: 2
