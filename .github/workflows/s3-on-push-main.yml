@@ -22,66 +22,69 @@ jobs:
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      # -------------------------
-      # Guardrail (a): strict request validation (name/region/tags)
-      # -------------------------
-      - name: Guardrails — validate request files
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          ALLOWED_REGIONS="^(ap-south-1|us-east-1|eu-west-1)$"
-          REQUIRED_TAGS=("owner" "env")
+      # Guardrails — validate request files
+- name: Guardrails — validate request files
+  shell: bash
+  run: |
+    set -euo pipefail
+    shopt -s nullglob
+    ALLOWED_REGIONS="^(ap-south-1|us-east-1|eu-west-1)$"
+    REQUIRED_TAGS=("owner" "env")
 
-          files=(infra/requests/s3/*.{yml,yaml})
-          echo "Files to validate: ${files[*]:-<none>}"
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No request files found under infra/requests/s3/"
-            exit 0
-          fi
+    files=(infra/requests/s3/*.{yml,yaml})
+    echo "Files to validate: ${files[*]:-<none>}"
+    if [ ${#files[@]} -eq 0 ]; then
+      echo "No request files found under infra/requests/s3/"
+      exit 0
+    fi
 
-          for f in "${files[@]}"; do
-            echo "---- Validating $f ----"
-            # Use -r and // empty to avoid literal 'null'
-            name=$(yq -r '.bucket_name // empty' "$f")
-            region=$(yq -r '.region // empty' "$f")
-            owner=$(yq -r '.tags.owner // empty' "$f")
-            envv=$(yq -r '.tags.env // empty' "$f")
-            echo "parsed: bucket_name='$name' region='$region' tags.owner='$owner' tags.env='$envv'"
+    for f in "${files[@]}"; do
+      echo "---- Validating $f ----"
+      # 0) Ensure it's valid YAML
+      if ! yq -e '.' "$f" >/dev/null 2>&1; then
+        echo "::error file=$f::Invalid YAML syntax"
+        exit 1
+      fi
 
-            [[ "$name" =~ ^[a-z0-9.-]{3,63}$ ]] || { echo "::error file=$f::Invalid bucket name"; exit 1; }
-            [[ "$name" =~ ^guru-poc- ]] || { echo "::error file=$f::Bucket must start with 'guru-poc-'"; exit 1; }
-            [[ "$region" =~ $ALLOWED_REGIONS ]] || { echo "::error file=$f::Region not allowed ($region)"; exit 1; }
+      # 1) Parse with safe fallbacks (use // "" — empty string)
+      name=$(yq -r '.bucket_name // ""' "$f")
+      region=$(yq -r '.region // ""' "$f")
+      owner=$(yq -r '.tags.owner // ""' "$f")
+      envv=$(yq -r '.tags.env // ""' "$f")
+      echo "parsed: bucket_name='$name' region='$region' tags.owner='$owner' tags.env='$envv'"
 
-            # required tags
-            [ -n "$owner" ] || { echo "::error file=$f::Missing tags.owner"; exit 1; }
-            [ -n "$envv" ]  || { echo "::error file=$f::Missing tags.env"; exit 1; }
-          done
+      # 2) Validate basics
+      [[ "$name" =~ ^[a-z0-9.-]{3,63}$ ]] || { echo "::error file=$f::Invalid bucket name"; exit 1; }
+      [[ "$name" =~ ^guru-poc- ]] || { echo "::error file=$f::Bucket must start with 'guru-poc-'"; exit 1; }
+      [[ "$region" =~ $ALLOWED_REGIONS ]] || { echo "::error file=$f::Region not allowed ($region)"; exit 1; }
 
-      # -------------------------
-      # Guardrail (b): forbid insecure overrides (public / encryption / versioning)
-      # -------------------------
-      - name: Guardrails — forbid insecure settings
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          for f in infra/requests/s3/*.{yml,yaml}; do
-            echo "Checking insecure flags in $f"
-            pub=$(yq -r '.public // empty' "$f")
-            enc=$(yq -r '.encryption // empty' "$f")
-            ver=$(yq -r '.versioning // empty' "$f")
+      # 3) Required tags
+      [ -n "$owner" ] || { echo "::error file=$f::Missing tags.owner"; exit 1; }
+      [ -n "$envv" ]  || { echo "::error file=$f::Missing tags.env"; exit 1; }
+    done
 
-            if [ "$pub" = "true" ]; then
-              echo "::error file=$f::Public buckets are not allowed"; exit 1
-            fi
-            if [ "$enc" = "disabled" ]; then
-              echo "::error file=$f::Encryption must not be disabled"; exit 1
-            fi
-            if [ "$ver" = "disabled" ]; then
-              echo "::error file=$f::Versioning must not be disabled"; exit 1
-            fi
-          done
+# Guardrails — forbid insecure settings
+- name: Guardrails — forbid insecure settings
+  shell: bash
+  run: |
+    set -euo pipefail
+    shopt -s nullglob
+    for f in infra/requests/s3/*.{yml,yaml}; do
+      echo "Checking insecure flags in $f"
+      pub=$(yq -r '.public // ""' "$f")
+      enc=$(yq -r '.encryption // ""' "$f")
+      ver=$(yq -r '.versioning // ""' "$f")
+
+      if [ "$pub" = "true" ]; then
+        echo "::error file=$f::Public buckets are not allowed"; exit 1
+      fi
+      if [ "$enc" = "disabled" ]; then
+        echo "::error file=$f::Encryption must not be disabled"; exit 1
+      fi
+      if [ "$ver" = "disabled" ]; then
+        echo "::error file=$f::Versioning must not be disabled"; exit 1
+      fi
+    done
       # We only configure AWS after guardrails pass
       - name: Configure AWS credentials (IAM keys)
         uses: aws-actions/configure-aws-credentials@v4
