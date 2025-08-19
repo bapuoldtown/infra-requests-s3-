@@ -22,6 +22,69 @@ jobs:
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
+      # -------------------------
+      # Guardrail (a): strict request validation (name/region/tags)
+      # -------------------------
+      - name: Guardrails — validate request files
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ALLOWED_REGIONS="^(ap-south-1|us-east-1|eu-west-1)$"
+          REQUIRED_TAGS=("owner" "env")
+
+          files=(infra/requests/s3/*.{yml,yaml})
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No request files found under infra/requests/s3/"
+            exit 0
+          fi
+
+          for f in "${files[@]}"; do
+            echo "Validating $f"
+            name=$(yq '.bucket_name' "$f")
+            region=$(yq '.region' "$f")
+
+            # basic name/region rules
+            [[ "$name" =~ ^[a-z0-9.-]{3,63}$ ]] || { echo "::error file=$f::Invalid bucket name"; exit 1; }
+            [[ "$name" =~ ^guru-poc- ]] || { echo "::error file=$f::Bucket must start with 'guru-poc-'"; exit 1; }
+            [[ "$region" =~ $ALLOWED_REGIONS ]] || { echo "::error file=$f::Region not allowed ($region)"; exit 1; }
+
+            # required tags (owner, env)
+            for t in "${REQUIRED_TAGS[@]}"; do
+              val=$(yq ".tags.$t" "$f")
+              if [ -z "${val:-}" ] || [ "$val" = "null" ]; then
+                echo "::error file=$f::Missing tags.$t"
+                exit 1
+              fi
+            done
+          done
+
+      # -------------------------
+      # Guardrail (b): forbid insecure overrides (public / encryption / versioning)
+      # -------------------------
+      - name: Guardrails — forbid insecure settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in infra/requests/s3/*.{yml,yaml}; do
+            echo "Checking insecure flags in $f"
+            pub=$(yq '.public' "$f" || true)
+            enc=$(yq '.encryption' "$f" || true)
+            ver=$(yq '.versioning' "$f" || true)
+
+            if [ "$pub" = "true" ]; then
+              echo "::error file=$f::Public buckets are not allowed"; exit 1
+            fi
+            if [ "$enc" = "disabled" ]; then
+              echo "::error file=$f::Encryption must not be disabled"; exit 1
+            fi
+            if [ "$ver" = "disabled" ]; then
+              echo "::error file=$f::Versioning must not be disabled"; exit 1
+            fi
+          done
+
+      # We only configure AWS after guardrails pass
       - name: Configure AWS credentials (IAM keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -29,7 +92,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ap-south-1
 
-      # === Option B: scan ALL request files each push ===
+      # Scan ALL request files each push
       - name: Collect request files (scan-all)
         id: changed
         shell: bash
@@ -55,7 +118,7 @@ jobs:
             BUCKET=$(yq '.bucket_name' "$f")
             REGION=$(yq '.region' "$f")
 
-            # Basic validations
+            # Basic validations (defense-in-depth)
             [[ "$BUCKET" =~ ^[a-z0-9.-]{3,63}$ ]] || { echo "Invalid bucket name: $BUCKET"; exit 1; }
             [[ "$BUCKET" =~ ^guru-poc- ]] || { echo "Bucket must start with 'guru-poc-'"; exit 1; }
             [ -n "$REGION" ] || { echo "Missing region in $f"; exit 1; }
